@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "LeetCode Assistant",
+  "version": "1.0.0",
+  "description": "Tracks problem solving and provides insights on LeetCode",
+
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+
+  "host_permissions": [
+    "https://leetcode.com/*", "http://localhost:5000/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": ["https://leetcode.com/problems/*"],
+      "js": ["components/dashboardWindow.js", "components/chatWindow.js", "content.js"]
+    }
+  ],
+
+  "icons": {
+    "16": "public/candle.png",
+    "48": "public/candle.png",
+    "128": "public/candle.png"
+  },
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "public/candle.png",
+      "48": "public/candle.png",
+      "128": "public/candle.png"
+    },
+    "default_title": "LeetCode Dashboard"
+  }
+}

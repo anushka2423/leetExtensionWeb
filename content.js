@@ -152,6 +152,22 @@ function getBestEffortCurrentCode() {
   const ta = document.querySelector("textarea");
   if (ta && ta.value && ta.value.trim()) return ta.value;
 
+  // Monaco DOM fallback: reconstruct from rendered view lines.
+  // Works when Monaco models are not accessible in the content script.
+  try {
+    const root =
+      document.querySelector(".monaco-editor .view-lines") ||
+      document.querySelector(".view-lines.monaco-mouse-cursor-text");
+    if (root) {
+      const lines = Array.from(root.querySelectorAll(".view-line")).map((lineEl) => {
+        const t = (lineEl.textContent || "").replace(/\u00a0/g, ""); // NBSPs are used for indentation
+        return t.replace(/\s+$/g, ""); // trim end only
+      });
+      const joined = lines.join("\n").trimEnd();
+      if (joined.trim().length) return joined;
+    }
+  } catch (_) {}
+
   return "";
 }
 

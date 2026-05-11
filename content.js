@@ -574,6 +574,139 @@ async function leetcodeGraphql(payload) {
   return res.json();
 }
 
+const USER_PROGRESS_QUESTION_LIST_QUERY = `
+  query userProgressQuestionList($filters: UserProgressQuestionListInput) {
+    userProgressQuestionList(filters: $filters) {
+      totalNum
+      questions {
+        translatedTitle
+        frontendId
+        title
+        titleSlug
+        difficulty
+        lastSubmittedAt
+        numSubmitted
+        questionStatus
+        lastResult
+        topicTags {
+          name
+          nameTranslated
+          slug
+        }
+      }
+    }
+  }
+`;
+
+function parseLeetcodeProgressAt(iso) {
+  if (iso == null || iso === "") return null;
+  const t = Date.parse(String(iso));
+  return Number.isFinite(t) ? t : null;
+}
+
+/**
+ * Paginates user progress (recent activity first). Stops when a full page is entirely older than `olderThanMs` (optional).
+ */
+async function fetchUserProgressQuestions(options = {}) {
+  const limit = Math.min(50, Math.max(1, Number(options.limit) || 50));
+  const olderThanMs = options.olderThanMs;
+  const maxPages = Math.min(40, Math.max(1, Number(options.maxPages) || 40));
+
+  const collected = [];
+  let totalNum = 0;
+  let skip = 0;
+
+  for (let page = 0; page < maxPages; page++) {
+    const json = await leetcodeGraphql({
+      operationName: "userProgressQuestionList",
+      query: USER_PROGRESS_QUESTION_LIST_QUERY,
+      variables: { filters: { skip, limit } }
+    });
+
+    if (json?.errors?.length) {
+      const msg = json.errors[0]?.message || "Progress query failed";
+      throw new Error(msg);
+    }
+
+    const block = json?.data?.userProgressQuestionList;
+    if (!block || !Array.isArray(block.questions)) {
+      throw new Error("Unexpected progress response");
+    }
+
+    totalNum = typeof block.totalNum === "number" ? block.totalNum : totalNum;
+    const batch = block.questions;
+    collected.push(...batch);
+
+    if (batch.length < limit) break;
+    if (skip + batch.length >= totalNum) break;
+
+    if (typeof olderThanMs === "number") {
+      const times = batch
+        .map(q => parseLeetcodeProgressAt(q?.lastSubmittedAt))
+        .filter(t => t != null);
+      if (times.length && times.every(t => t < olderThanMs)) break;
+    }
+
+    skip += limit;
+  }
+
+  return { totalNum, questions: collected };
+}
+
+function buildProgressTopicInsights(questions, nowMs = Date.now()) {
+  const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+  const windowStart = nowMs - sevenDaysMs;
+
+  const topicCounts = new Map();
+  for (const q of questions) {
+    if (!q || q.questionStatus !== "SOLVED") continue;
+    if (String(q.lastResult || "").toUpperCase() !== "AC") continue;
+    const ts = parseLeetcodeProgressAt(q.lastSubmittedAt);
+    if (ts == null || ts < windowStart) continue;
+    const tags = Array.isArray(q.topicTags) ? q.topicTags : [];
+    for (const tag of tags) {
+      const name = (tag && tag.name) || "";
+      const slug = (tag && tag.slug) || name;
+      if (!name && !slug) continue;
+      const key = slug || name;
+      const prev = topicCounts.get(key) || { name: name || slug, slug: slug || key, count: 0 };
+      prev.count += 1;
+      if (name) prev.name = name;
+      topicCounts.set(key, prev);
+    }
+  }
+
+  const last7DaysTopics = [...topicCounts.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+  const last10 = questions.slice(0, 10).map(q => ({
+    title: q?.title || "Unknown",
+    titleSlug: q?.titleSlug || "",
+    questionStatus: q?.questionStatus || "",
+    lastResult: q?.lastResult || "",
+    lastSubmittedAt: q?.lastSubmittedAt || "",
+    topicTags: Array.isArray(q?.topicTags)
+      ? q.topicTags.map(t => ({ name: (t && t.name) || "", slug: (t && t.slug) || "" })).filter(t => t.name || t.slug)
+      : []
+  }));
+
+  return { last7DaysTopics, last10 };
+}
+
+async function loadProgressTopicInsights() {
+  try {
+    const { questions } = await fetchUserProgressQuestions({
+      olderThanMs: Date.now() - 7 * 24 * 60 * 60 * 1000
+    });
+    return buildProgressTopicInsights(questions);
+  } catch (err) {
+    return {
+      error: String(err?.message || err || "Could not load progress topics"),
+      last7DaysTopics: [],
+      last10: []
+    };
+  }
+}
+
 async function fetchProblemDetails(slug) {
   const query = `
     query getQuestionDetail($titleSlug: String!) {
@@ -669,13 +802,20 @@ async function fetchRecentSubmissionIds(slug, limit = 3) {
     envelope = parseSubmissionListEnvelope(json);
   }
 
-  if (!envelope?.submissions) {
+  if (!envelope) {
     const msg = json?.errors?.[0]?.message || "Could not read submission list";
     throw new Error(msg);
   }
 
-  const rows = envelope.submissions;
-  const sorted = [...rows].sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
+  const raw = envelope.submissions;
+  if (raw == null) {
+    return [];
+  }
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+
+  const sorted = [...raw].sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
   return sorted.slice(0, limit).map(s => String(s.id));
 }
 
@@ -708,7 +848,7 @@ function mean(nums) {
  * or accepted runs are clearly below typical performance (percentile vs other users).
  */
 function evaluateLastSubmissionsHealth(detailsList) {
-  const list = (detailsList || []).filter(Boolean);
+  const list = Array.isArray(detailsList) ? detailsList.filter(Boolean) : [];
   const n = list.length;
 
   if (!n) {
@@ -851,8 +991,18 @@ window.addEventListener("beforeunload", () => {
 
 // ===== Load Dashboard =====
 async function loadDashboard() {
-  const res = await fetch("http://localhost:8000/api/stats");
-  const data = await res.json();
+  let data = {};
+  try {
+    const res = await fetch("http://localhost:8000/api/stats");
+    if (res.ok) {
+      const parsed = await res.json();
+      if (parsed && typeof parsed === "object") {
+        data = parsed;
+      }
+    }
+  } catch (_) {
+    data = {};
+  }
 
   let submissionHealth = null;
   try {
@@ -864,7 +1014,15 @@ async function loadDashboard() {
     };
   }
 
-  dashboard.renderData({ ...data, submissionHealth });
+  const progressTopicInsights = await loadProgressTopicInsights();
+
+  dashboard.renderData({
+    quote: "Keep going.",
+    totalProblems: 0,
+    ...data,
+    submissionHealth,
+    progressTopicInsights
+  });
 }
 
 // ===== Events =====

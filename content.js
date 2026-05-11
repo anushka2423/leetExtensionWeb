@@ -595,7 +595,7 @@ chat.addEventListener("click", (e) => {
   }
 
   if (e.target.id === "hintAction") {
-    if (hintsUsed >= 0) {
+    if (hintsUsed >= 5) {
       appendChatMessage("System", "Generating the full solution and filling it into the editor...");
       void requestSolutionFromBackend().catch(() => {
         appendChatMessage("Error", "Unexpected error while generating solution.");

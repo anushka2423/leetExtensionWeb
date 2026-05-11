@@ -45,6 +45,8 @@ let previousHints = [];
 let hintInFlight = false;
 let solutionAccepted = false;
 let solutionInFlight = false;
+let acceptedCodeSnapshot = "";
+let codeChangeWatcherId = null;
 
 // ===== Helpers =====
 function pauseAnimation() {
@@ -89,6 +91,27 @@ function setHintButtonState() {
 
   btn.disabled = false;
   btn.textContent = `Get Hint (${hintsUsed}/5)`;
+}
+
+function resetHintProgressAfterCodeEdit() {
+  solutionAccepted = false;
+  hintsUsed = 0;
+  previousHints = [];
+  acceptedCodeSnapshot = "";
+  setHintButtonState();
+  appendChatMessage("System", "Code changed after correct solution. Hint progress reset to 0.");
+}
+
+function startCodeChangeWatcher() {
+  if (codeChangeWatcherId) return;
+  codeChangeWatcherId = setInterval(() => {
+    if (!solutionAccepted || !acceptedCodeSnapshot) return;
+    const currentCode = getBestEffortCurrentCode();
+    if (!currentCode || !String(currentCode).trim()) return;
+    if (String(currentCode).trim() !== String(acceptedCodeSnapshot).trim()) {
+      resetHintProgressAfterCodeEdit();
+    }
+  }, 1200);
 }
 
 async function copyTextToClipboard(text) {
@@ -171,8 +194,56 @@ function appendChatMessage(role, text, options = {}) {
   box.scrollTop = box.scrollHeight;
 }
 
-// Note: we do NOT auto-detect "Accepted" in the DOM.
-// We only lock hints when the backend response (prompt-driven) confirms correctness.
+// We still trust backend as source-of-truth for locking hints,
+// but we send best-effort submission status from DOM to help backend decide.
+
+function mapStatusFromText(rawText) {
+  const t = String(rawText || "").toLowerCase();
+  if (!t) return "Unknown";
+  if (/\baccepted\b/.test(t)) return "Accepted";
+  if (/wrong answer/.test(t)) return "Wrong Answer";
+  if (/runtime error/.test(t)) return "Runtime Error";
+  if (/compile error|compilation error/.test(t)) return "Compile Error";
+  if (/time limit exceeded/.test(t)) return "Time Limit Exceeded";
+  if (/memory limit exceeded/.test(t)) return "Memory Limit Exceeded";
+  return "Unknown";
+}
+
+function getBestEffortExecutionStatus() {
+  const candidates = [
+    '[data-e2e-locator="submission-result"]',
+    '[data-e2e-locator="console-result"]',
+    '[data-cy="submission-result"]',
+    '.text-green-s',
+    '.text-red-s',
+    '.text-yellow-s'
+  ];
+
+  for (const sel of candidates) {
+    const nodes = Array.from(document.querySelectorAll(sel));
+    for (const node of nodes) {
+      const mapped = mapStatusFromText(node?.innerText || node?.textContent || "");
+      if (mapped !== "Unknown") return mapped;
+    }
+  }
+
+  // Broad fallback: inspect likely result containers only (avoid whole-page noise).
+  const containerCandidates = [
+    '[class*="result"]',
+    '[class*="Result"]',
+    '[data-e2e-locator*="result"]',
+    '[data-cy*="result"]'
+  ];
+  for (const sel of containerCandidates) {
+    const nodes = Array.from(document.querySelectorAll(sel)).slice(0, 40);
+    for (const node of nodes) {
+      const mapped = mapStatusFromText(node?.innerText || node?.textContent || "");
+      if (mapped !== "Unknown") return mapped;
+    }
+  }
+
+  return "Unknown";
+}
 
 function setBestEffortEditorCode(newCode) {
   const code = String(newCode || "");
@@ -341,7 +412,7 @@ async function requestHintFromBackend() {
     compileErrors: [],
     runtimeErrors: [],
     userQuestion: "",
-    executionStatus: "Unknown",
+    executionStatus: getBestEffortExecutionStatus(),
     optimizationNeeded: false
   };
 
@@ -387,6 +458,7 @@ async function requestHintFromBackend() {
 
     if (isCorrectAnswer) {
       solutionAccepted = true;
+      acceptedCodeSnapshot = getBestEffortCurrentCode();
       appendChatMessage("System", hintMsg);
       setHintButtonState();
       return;
@@ -456,6 +528,7 @@ async function requestSolutionFromBackend() {
     const filled = setBestEffortEditorCode(solutionCode);
     if (filled) {
       solutionAccepted = true;
+      acceptedCodeSnapshot = solutionCode;
       appendChatMessage("System", "Solution filled into the editor.");
       setHintButtonState();
       return;
@@ -514,12 +587,14 @@ async function initTracking() {
   hintInFlight = false;
   solutionAccepted = false;
   solutionInFlight = false;
+  acceptedCodeSnapshot = "";
   setHintButtonState();
 
   console.log("Tracking:", meta);
 }
 
 setTimeout(initTracking, 2000);
+startCodeChangeWatcher();
 
 // ===== TEMP attempt tracking =====
 document.addEventListener("keydown", (e) => {

@@ -89,7 +89,7 @@ window.createDashboard = function () {
       <ul class="db-list">${revisitList || "<li class='db-list-item'>All caught up! 🎉</li>"}</ul>
 
       <div class="db-footer">
-        <button id="goNext" class="db-btn db-btn-primary">Go to Next</button>
+        <button id="goNext" class="db-btn db-btn-primary">Stuck!!! Take Some Hint 😗</button>
         <button id="close1" class="db-btn db-btn-secondary">Close</button>
       </div>
     `;

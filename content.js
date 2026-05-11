@@ -43,6 +43,8 @@ let meta = null;
 let hintsUsed = 0;
 let previousHints = [];
 let hintInFlight = false;
+let solutionAccepted = false;
+let solutionInFlight = false;
 
 // ===== Helpers =====
 function pauseAnimation() {
@@ -61,6 +63,18 @@ function setHintButtonState() {
   const btn = chat.querySelector("#hintAction");
   if (!btn) return;
 
+  if (solutionInFlight) {
+    btn.disabled = true;
+    btn.textContent = "Filling solution...";
+    return;
+  }
+
+  if (solutionAccepted) {
+    btn.disabled = true;
+    btn.textContent = "Solution is correct ✓";
+    return;
+  }
+
   if (hintInFlight) {
     btn.disabled = true;
     btn.textContent = "Getting hint...";
@@ -77,7 +91,30 @@ function setHintButtonState() {
   btn.textContent = `Get Hint (${hintsUsed}/5)`;
 }
 
-function appendChatMessage(role, text) {
+async function copyTextToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(String(text || ""));
+    return true;
+  } catch (_) {}
+
+  // Fallback for pages where clipboard API is unavailable.
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = String(text || "");
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    return Boolean(ok);
+  } catch (_) {
+    return false;
+  }
+}
+
+function appendChatMessage(role, text, options = {}) {
   const box = chat.querySelector("#chatMessages");
   if (!box) return;
 
@@ -90,12 +127,78 @@ function appendChatMessage(role, text) {
 
   const bubble = document.createElement("div");
   bubble.className = "lc-msg-bubble";
-  bubble.textContent = text;
+  bubble.style.position = "relative";
+  bubble.style.whiteSpace = "pre-wrap";
+  bubble.style.wordBreak = "break-word";
+
+  const contentEl = document.createElement("div");
+  contentEl.textContent = text;
+
+  const copyText = options.copyText;
+  if (copyText && String(copyText).trim()) {
+    bubble.style.paddingTop = "30px";
+
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.textContent = "Copy";
+    copyBtn.style.position = "absolute";
+    copyBtn.style.top = "6px";
+    copyBtn.style.right = "8px";
+    copyBtn.style.border = "1px solid rgba(255,255,255,0.25)";
+    copyBtn.style.background = "rgba(255,255,255,0.08)";
+    copyBtn.style.color = "#fff";
+    copyBtn.style.borderRadius = "6px";
+    copyBtn.style.fontSize = "11px";
+    copyBtn.style.padding = "2px 8px";
+    copyBtn.style.cursor = "pointer";
+
+    copyBtn.addEventListener("click", async () => {
+      const copied = await copyTextToClipboard(copyText);
+      copyBtn.textContent = copied ? "Copied" : "Copy failed";
+      setTimeout(() => {
+        copyBtn.textContent = "Copy";
+      }, 1400);
+    });
+
+    bubble.appendChild(copyBtn);
+  }
+
+  bubble.appendChild(contentEl);
 
   wrapper.appendChild(roleEl);
   wrapper.appendChild(bubble);
   box.appendChild(wrapper);
   box.scrollTop = box.scrollHeight;
+}
+
+// Note: we do NOT auto-detect "Accepted" in the DOM.
+// We only lock hints when the backend response (prompt-driven) confirms correctness.
+
+function setBestEffortEditorCode(newCode) {
+  const code = String(newCode || "");
+  if (!code.trim()) return false;
+
+  try {
+    if (window.monaco && window.monaco.editor && typeof window.monaco.editor.getModels === "function") {
+      const models = window.monaco.editor.getModels();
+      if (Array.isArray(models) && models.length) {
+        // Pick the "largest" model to avoid overwriting small scratch buffers.
+        let best = models[0];
+        for (const m of models) {
+          const v = m && typeof m.getValue === "function" ? m.getValue() : "";
+          const bestV = best && typeof best.getValue === "function" ? best.getValue() : "";
+          if (String(v || "").length >= String(bestV || "").length) best = m;
+        }
+        if (best && typeof best.setValue === "function") {
+          best.setValue(code);
+          return true;
+        }
+      }
+    }
+  } catch (_) {}
+
+  // If Monaco models aren’t accessible from the content script, we can’t safely autofill.
+  return false;
 }
 
 function getBestEffortProblemDescription() {
@@ -121,15 +224,64 @@ function getBestEffortConstraints() {
 }
 
 function getBestEffortLanguage() {
-  const candidates = [
+  const normalize = (s) =>
+    String(s || "")
+      .replace(/\s+/g, " ")
+      .trim();
+
+  const extractFirstToken = (s) => {
+    const t = normalize(s);
+    if (!t) return "";
+    // Often the language button text is like: "Java" or "Java Auto"
+    // We only need the language name (first token).
+    return t.split(" ")[0];
+  };
+
+  // 1) Older selectors (kept for compatibility).
+  const legacyCandidates = [
     '[data-cy="lang-select"]',
     'button[aria-label*="Language"]',
     'button[aria-label*="language"]'
   ];
-  for (const sel of candidates) {
+  for (const sel of legacyCandidates) {
     const el = document.querySelector(sel);
-    if (el && el.innerText && el.innerText.trim()) return el.innerText.trim();
+    const lang = extractFirstToken(el?.innerText);
+    if (lang) return lang;
   }
+
+  // 2) New LeetCode UI: language picker is a dialog trigger with the language as the first text.
+  // Example: <button aria-haspopup="dialog" ...>Java <chevron/></button>
+  const dialogButtons = Array.from(document.querySelectorAll('button[aria-haspopup="dialog"]'));
+  const known = new Set([
+    "C++",
+    "C",
+    "Java",
+    "Python",
+    "Python3",
+    "JavaScript",
+    "TypeScript",
+    "C#",
+    "Go",
+    "Rust",
+    "Kotlin",
+    "Swift",
+    "PHP",
+    "Ruby",
+    "Scala",
+    "Dart"
+  ]);
+
+  for (const btn of dialogButtons) {
+    const raw = normalize(btn?.innerText);
+    if (!raw) continue;
+    // Skip non-language dialogs
+    if (raw.length > 24) continue;
+    if (/^Auto$/i.test(raw)) continue;
+
+    const token = extractFirstToken(raw);
+    if (known.has(token)) return token;
+  }
+
   return "";
 }
 
@@ -188,7 +340,9 @@ async function requestHintFromBackend() {
     hintLevel: Math.min(4, Math.max(1, hintsUsed + 1)),
     compileErrors: [],
     runtimeErrors: [],
-    userQuestion: ""
+    userQuestion: "",
+    executionStatus: "Unknown",
+    optimizationNeeded: false
   };
 
   try {
@@ -226,6 +380,18 @@ async function requestHintFromBackend() {
       return;
     }
 
+    const isCorrectAnswer =
+      Boolean(data?.isCorrectAnswer) ||
+      Boolean(data?.meta?.isCorrectAnswer) ||
+      Boolean(data?.meta?.solutionCorrect);
+
+    if (isCorrectAnswer) {
+      solutionAccepted = true;
+      appendChatMessage("System", hintMsg);
+      setHintButtonState();
+      return;
+    }
+
     previousHints = [...previousHints, hintMsg];
     hintsUsed++;
     appendChatMessage(`Hint ${hintsUsed}`, hintMsg);
@@ -242,6 +408,71 @@ function openSolutionPage() {
   if (!slug) return;
   const url = `https://leetcode.com/problems/${slug}/solution/`;
   window.open(url, "_blank", "noopener,noreferrer");
+}
+
+async function requestSolutionFromBackend() {
+  if (solutionInFlight) return;
+
+  solutionInFlight = true;
+  setHintButtonState();
+
+  const payload = {
+    problemTitle: meta?.title || "",
+    problemDescription: getBestEffortProblemDescription(),
+    constraints: getBestEffortConstraints(),
+    language: getBestEffortLanguage()
+  };
+
+  try {
+    const res = await fetch("http://localhost:8000/api/generate-solution", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    let data = null;
+    try {
+      data = await res.json();
+    } catch (_) {
+      data = null;
+    }
+
+    if (!res.ok) {
+      const msg =
+        (data && (data.error || data.message)) ||
+        (res.status >= 500
+          ? "Backend error (500). Please check backend logs."
+          : `Request failed (${res.status}).`);
+      appendChatMessage("Error", msg);
+      return;
+    }
+
+    const solutionCode = data?.solutionCode;
+    if (!solutionCode || !String(solutionCode).trim()) {
+      appendChatMessage("Error", "No solution code returned from backend.");
+      return;
+    }
+
+    const filled = setBestEffortEditorCode(solutionCode);
+    if (filled) {
+      solutionAccepted = true;
+      appendChatMessage("System", "Solution filled into the editor.");
+      setHintButtonState();
+      return;
+    }
+
+    // Fallback: if we can't set Monaco code, show solution directly in chat.
+    appendChatMessage(
+      "System",
+      "I generated the solution but couldn’t auto-fill your editor. Here is the full solution:"
+    );
+    appendChatMessage("Solution", solutionCode, { copyText: solutionCode });
+  } catch (err) {
+    appendChatMessage("Error", "Failed to reach backend. Is it running on http://localhost:8000 ?");
+  } finally {
+    solutionInFlight = false;
+    setHintButtonState();
+  }
 }
 
 // ===== GraphQL =====
@@ -281,6 +512,8 @@ async function initTracking() {
   hintsUsed = 0;
   previousHints = [];
   hintInFlight = false;
+  solutionAccepted = false;
+  solutionInFlight = false;
   setHintButtonState();
 
   console.log("Tracking:", meta);
@@ -362,11 +595,15 @@ chat.addEventListener("click", (e) => {
   }
 
   if (e.target.id === "hintAction") {
-    if (hintsUsed >= 5) {
-      appendChatMessage("System", "Opening the official solution in a new tab.");
-      openSolutionPage();
+    if (hintsUsed >= 0) {
+      appendChatMessage("System", "Generating the full solution and filling it into the editor...");
+      void requestSolutionFromBackend().catch(() => {
+        appendChatMessage("Error", "Unexpected error while generating solution.");
+      });
     } else {
-      requestHintFromBackend();
+      void requestHintFromBackend().catch(() => {
+        appendChatMessage("Error", "Unexpected error while requesting hint.");
+      });
     }
   }
 

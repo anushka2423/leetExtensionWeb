@@ -45,6 +45,12 @@ window.createDashboard = function () {
     .db-btn-primary:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(127, 0, 255, 0.4); }
     .db-btn-secondary { background: rgba(255,255,255,0.1); color: white; }
     .db-btn-secondary:hover { background: rgba(255,255,255,0.2); }
+    .db-sh { margin: 14px 0; padding: 12px; border-radius: 10px; background: rgba(0,0,0,0.2); border: 1px solid rgba(255,255,255,0.08); font-size: 12px; line-height: 1.45; }
+    .db-sh-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.85; margin-bottom: 8px; }
+    .db-sh-verdict { font-size: 15px; font-weight: 700; margin-bottom: 6px; }
+    .db-sh-ok { color: #2ed573; }
+    .db-sh-warn { color: #ffa502; }
+    .db-sh-muted { opacity: 0.85; font-size: 11px; }
   `;
   document.head.appendChild(style);
 
@@ -69,6 +75,30 @@ window.createDashboard = function () {
         </li>`)
       .join("");
 
+    const sh = data.submissionHealth;
+    let submissionBlock = "";
+    if (sh && sh.error) {
+      submissionBlock = `
+        <div class="db-sh">
+          <div class="db-sh-title">This problem (LeetCode)</div>
+          <div class="db-sh-muted">${String(sh.error)}</div>
+        </div>`;
+    } else if (sh && typeof sh.needsRevisit === "boolean") {
+      const verdictClass = sh.needsRevisit ? "db-sh-warn" : "db-sh-ok";
+      const verdictLabel = sh.needsRevisit ? "Needs revisit" : "Solid for now";
+      const rt =
+        sh.avgRuntimePercentile != null ? `${sh.avgRuntimePercentile.toFixed(1)}%` : "—";
+      const mem =
+        sh.avgMemoryPercentile != null ? `${sh.avgMemoryPercentile.toFixed(1)}%` : "—";
+      submissionBlock = `
+        <div class="db-sh">
+          <div class="db-sh-title">This problem — last ${sh.lookedAt} submission(s)</div>
+          <div class="db-sh-verdict ${verdictClass}">${verdictLabel}</div>
+          <div class="db-sh-muted">Accepted: ${sh.acceptedCount}/${sh.lookedAt} · Avg runtime %ile: ${rt} · Avg memory %ile: ${mem}</div>
+          <div style="margin-top:8px; font-size:12px;">${sh.summary}</div>
+        </div>`;
+    }
+
     panel.innerHTML = `
       <div class="db-header">LeetCode Progress</div>
 
@@ -85,7 +115,8 @@ window.createDashboard = function () {
         </div>
       </div>
 
-      <div style="font-size: 12px; font-weight: 600; margin-bottom: 8px; opacity: 0.8; text-transform: uppercase;">Needs Revisit</div>
+      ${submissionBlock}
+      
       <ul class="db-list">${revisitList || "<li class='db-list-item'>All caught up! 🎉</li>"}</ul>
 
       <div class="db-footer">

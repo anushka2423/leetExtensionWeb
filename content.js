@@ -549,6 +549,31 @@ async function requestSolutionFromBackend() {
 }
 
 // ===== GraphQL =====
+function getLeetcodeCsrfToken() {
+  const m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
+  return m ? decodeURIComponent(m[1]) : "";
+}
+
+async function leetcodeGraphql(payload) {
+  const csrf = getLeetcodeCsrfToken();
+  const headers = {
+    "Content-Type": "application/json",
+    ...(csrf ? { "x-csrftoken": csrf } : {})
+  };
+  if (payload.operationName) {
+    headers["x-operation-name"] = payload.operationName;
+  }
+
+  const res = await fetch("https://leetcode.com/graphql", {
+    method: "POST",
+    headers,
+    credentials: "include",
+    body: JSON.stringify(payload)
+  });
+
+  return res.json();
+}
+
 async function fetchProblemDetails(slug) {
   const query = `
     query getQuestionDetail($titleSlug: String!) {
@@ -562,17 +587,206 @@ async function fetchProblemDetails(slug) {
     }
   `;
 
-  const res = await fetch("https://leetcode.com/graphql", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      query,
-      variables: { titleSlug: slug }
-    })
+  const data = await leetcodeGraphql({
+    operationName: "getQuestionDetail",
+    query,
+    variables: { titleSlug: slug }
   });
 
-  const data = await res.json();
   return data.data.question;
+}
+
+const SUBMISSION_DETAILS_QUERY = `
+  query submissionDetails($submissionId: Int!) {
+    submissionDetails(submissionId: $submissionId) {
+      runtimePercentile
+      memoryPercentile
+      runtimeDisplay
+      memoryDisplay
+      statusCode
+      timestamp
+    }
+  }
+`;
+
+const QUESTION_SUBMISSION_LIST_QUERY = `
+  query submissionList($questionSlug: String!, $offset: Int!, $limit: Int!, $lastKey: String) {
+    questionSubmissionList(
+      questionSlug: $questionSlug
+      offset: $offset
+      limit: $limit
+      lastKey: $lastKey
+    ) {
+      lastKey
+      hasNext
+      submissions {
+        id
+        status
+        statusDisplay
+        timestamp
+      }
+    }
+  }
+`;
+
+const LEGACY_SUBMISSION_LIST_QUERY = `
+  query submissions($offset: Int!, $limit: Int!, $lastKey: String, $questionSlug: String!) {
+    submissionList(offset: $offset, limit: $limit, lastKey: $lastKey, questionSlug: $questionSlug) {
+      lastKey
+      hasNext
+      submissions {
+        id
+        status
+        statusDisplay
+        timestamp
+      }
+    }
+  }
+`;
+
+function parseSubmissionListEnvelope(json) {
+  const d = json?.data;
+  if (!d) return null;
+  if (d.questionSubmissionList) return d.questionSubmissionList;
+  if (d.submissionList) return d.submissionList;
+  return null;
+}
+
+async function fetchRecentSubmissionIds(slug, limit = 3) {
+  let json = await leetcodeGraphql({
+    operationName: "submissionList",
+    query: QUESTION_SUBMISSION_LIST_QUERY,
+    variables: { questionSlug: slug, offset: 0, limit, lastKey: null }
+  });
+
+  let envelope = parseSubmissionListEnvelope(json);
+  if (!envelope && Array.isArray(json?.errors)) {
+    json = await leetcodeGraphql({
+      operationName: "submissions",
+      query: LEGACY_SUBMISSION_LIST_QUERY,
+      variables: { offset: 0, limit, lastKey: null, questionSlug: slug }
+    });
+    envelope = parseSubmissionListEnvelope(json);
+  }
+
+  if (!envelope?.submissions) {
+    const msg = json?.errors?.[0]?.message || "Could not read submission list";
+    throw new Error(msg);
+  }
+
+  const rows = envelope.submissions;
+  const sorted = [...rows].sort((a, b) => Number(b.timestamp) - Number(a.timestamp));
+  return sorted.slice(0, limit).map(s => String(s.id));
+}
+
+async function fetchSubmissionDetails(submissionId) {
+  const sid = Number(submissionId);
+  if (!Number.isFinite(sid)) return null;
+
+  const json = await leetcodeGraphql({
+    operationName: "submissionDetails",
+    query: SUBMISSION_DETAILS_QUERY,
+    variables: { submissionId: sid }
+  });
+
+  if (json?.errors?.length) return null;
+  return json?.data?.submissionDetails || null;
+}
+
+function isAcceptedStatusCode(code) {
+  return Number(code) === 10;
+}
+
+function mean(nums) {
+  const n = nums.filter(v => typeof v === "number" && !Number.isNaN(v));
+  if (!n.length) return null;
+  return n.reduce((a, b) => a + b, 0) / n.length;
+}
+
+/**
+ * Uses up to the last 3 submissions: verdict "needs revisit" if any are not Accepted,
+ * or accepted runs are clearly below typical performance (percentile vs other users).
+ */
+function evaluateLastSubmissionsHealth(detailsList) {
+  const list = (detailsList || []).filter(Boolean);
+  const n = list.length;
+
+  if (!n) {
+    return {
+      lookedAt: 0,
+      acceptedCount: 0,
+      avgRuntimePercentile: null,
+      avgMemoryPercentile: null,
+      rows: [],
+      needsRevisit: false,
+      summary: "No recent submissions found for this problem."
+    };
+  }
+
+  const rows = list.map(d => ({
+    statusCode: d.statusCode,
+    accepted: isAcceptedStatusCode(d.statusCode),
+    runtimePercentile: typeof d.runtimePercentile === "number" ? d.runtimePercentile : null,
+    memoryPercentile: typeof d.memoryPercentile === "number" ? d.memoryPercentile : null,
+    runtimeDisplay: d.runtimeDisplay || "",
+    memoryDisplay: d.memoryDisplay || ""
+  }));
+
+  const acceptedCount = rows.filter(r => r.accepted).length;
+  const acceptedRows = rows.filter(r => r.accepted);
+
+  const avgRuntimePercentile = mean(acceptedRows.map(r => r.runtimePercentile));
+  const avgMemoryPercentile = mean(acceptedRows.map(r => r.memoryPercentile));
+
+  const reasons = [];
+  let needsRevisit = false;
+
+  if (acceptedCount < n) {
+    needsRevisit = true;
+    reasons.push(`${n - acceptedCount} of the last ${n} not Accepted`);
+  }
+
+  if (acceptedRows.length > 0) {
+    const lowRt = avgRuntimePercentile != null && avgRuntimePercentile < 35;
+    const lowMem = avgMemoryPercentile != null && avgMemoryPercentile < 35;
+    if (lowRt || lowMem) {
+      needsRevisit = true;
+      if (lowRt) reasons.push("runtime beats fewer than ~35% of submissions on average");
+      if (lowMem) reasons.push("memory beats fewer than ~35% of submissions on average");
+    }
+  }
+
+  const summary = needsRevisit
+    ? `Needs revisit — ${reasons.join("; ")}.`
+    : `On track — ${acceptedCount}/${n} Accepted in your last ${n}; runtime/memory percentiles look reasonable.`;
+
+  return {
+    lookedAt: n,
+    acceptedCount,
+    avgRuntimePercentile,
+    avgMemoryPercentile,
+    rows,
+    needsRevisit,
+    reasons,
+    summary
+  };
+}
+
+async function analyzeCurrentProblemSubmissions() {
+  const slug = getTitleSlug();
+  if (!slug) throw new Error("No problem slug in URL");
+
+  const ids = await fetchRecentSubmissionIds(slug, 3);
+  if (!ids.length) {
+    return evaluateLastSubmissionsHealth([]);
+  }
+
+  const details = await Promise.all(ids.map(id => fetchSubmissionDetails(id)));
+  if (ids.length && !details.some(Boolean)) {
+    throw new Error("Could not load submission details (try signing in to LeetCode or refreshing).");
+  }
+
+  return evaluateLastSubmissionsHealth(details);
 }
 
 // ===== INIT =====
@@ -640,7 +854,17 @@ async function loadDashboard() {
   const res = await fetch("http://localhost:8000/api/stats");
   const data = await res.json();
 
-  dashboard.renderData(data);
+  let submissionHealth = null;
+  try {
+    submissionHealth = await analyzeCurrentProblemSubmissions();
+  } catch (err) {
+    submissionHealth = {
+      error: String(err?.message || err || "Failed to load submission stats"),
+      needsRevisit: null
+    };
+  }
+
+  dashboard.renderData({ ...data, submissionHealth });
 }
 
 // ===== Events =====

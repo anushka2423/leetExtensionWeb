@@ -11,7 +11,8 @@
   ],
 
   "host_permissions": [
-    "https://leetcode.com/*", "http://localhost:8000/*"
+    "https://leetcode.com/*",
+    "https://leetextensionbackend.onrender.com/*"
   ],
 
   "background": {

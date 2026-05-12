@@ -417,7 +417,7 @@ async function requestHintFromBackend() {
   };
 
   try {
-    const res = await fetch("http://localhost:8000/api/generate-hint", {
+    const res = await fetch("https://leetextensionbackend.onrender.com/api/generate-hint", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -468,7 +468,10 @@ async function requestHintFromBackend() {
     hintsUsed++;
     appendChatMessage(`Hint ${hintsUsed}`, hintMsg);
   } catch (err) {
-    appendChatMessage("Error", "Failed to reach backend. Is it running on http://localhost:8000 ?");
+    appendChatMessage(
+      "Error",
+      "Failed to reach backend. Is it running on https://leetextensionbackend.onrender.com ?"
+    );
   } finally {
     hintInFlight = false;
     setHintButtonState();
@@ -496,7 +499,7 @@ async function requestSolutionFromBackend() {
   };
 
   try {
-    const res = await fetch("http://localhost:8000/api/generate-solution", {
+    const res = await fetch("https://leetextensionbackend.onrender.com/api/generate-solution", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
@@ -541,7 +544,10 @@ async function requestSolutionFromBackend() {
     );
     appendChatMessage("Solution", solutionCode, { copyText: solutionCode });
   } catch (err) {
-    appendChatMessage("Error", "Failed to reach backend. Is it running on http://localhost:8000 ?");
+    appendChatMessage(
+      "Error",
+      "Failed to reach backend. Is it running on https://leetextensionbackend.onrender.com ?"
+    );
   } finally {
     solutionInFlight = false;
     setHintButtonState();
@@ -1101,7 +1107,7 @@ async function sendData(status = "unsolved") {
 
   console.log("Sending:", payload);
 
-  await fetch("http://localhost:8000/api/save-problem", {
+  await fetch("https://leetextensionbackend.onrender.com/api/save-problem", {
     method: "POST",
     headers: {
       "Content-Type": "application/json"
@@ -1119,7 +1125,7 @@ window.addEventListener("beforeunload", () => {
 async function loadDashboard() {
   let data = {};
   try {
-    const res = await fetch("http://localhost:8000/api/stats");
+    const res = await fetch("https://leetextensionbackend.onrender.com/api/stats");
     if (res.ok) {
       const parsed = await res.json();
       if (parsed && typeof parsed === "object") {

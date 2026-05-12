@@ -692,6 +692,132 @@ function buildProgressTopicInsights(questions, nowMs = Date.now()) {
   return { last7DaysTopics, last10 };
 }
 
+const MY_CREATED_FAVORITE_LIST_QUERY = `
+  query myCreatedFavoriteList($currentQuestionSlug: String) {
+    myCreatedFavoriteList(currentQuestionSlug: $currentQuestionSlug) {
+      favorites {
+        name
+        slug
+        hasCurrentQuestion
+        isPublicFavorite
+        favoriteType
+      }
+      hasMore
+      totalLength
+    }
+  }
+`;
+
+const ADD_QUESTION_TO_NEW_FAVORITE_V2_MUTATION = `
+  mutation AddQuestionToNewFavoriteV2($name: String!, $isPublicFavorite: Boolean!, $questionSlug: String!) {
+    addQuestionToNewFavoriteV2(
+      name: $name
+      isPublicFavorite: $isPublicFavorite
+      questionSlug: $questionSlug
+    ) {
+      ok
+      error
+      slug
+    }
+  }
+`;
+
+const ADD_QUESTION_TO_FAVORITE_MUTATION = `
+  mutation addQuestionToFavorite($favoriteSlug: String!, $questionSlug: String!) {
+    addQuestionToFavorite(favoriteSlug: $favoriteSlug, questionSlug: $questionSlug) {
+      ok
+      error
+    }
+  }
+`;
+
+const revisitSyncInFlightBySlug = new Set();
+
+function normalizeFavoriteListName(name) {
+  return String(name || "").trim().toLowerCase();
+}
+
+async function fetchMyCreatedFavoriteLists(currentQuestionSlug) {
+  const json = await leetcodeGraphql({
+    operationName: "myCreatedFavoriteList",
+    query: MY_CREATED_FAVORITE_LIST_QUERY,
+    variables: { currentQuestionSlug: String(currentQuestionSlug || "") }
+  });
+  if (json?.errors?.length) {
+    throw new Error(json.errors[0]?.message || "Failed to load favorite lists");
+  }
+  const favorites = json?.data?.myCreatedFavoriteList?.favorites;
+  return Array.isArray(favorites) ? favorites : [];
+}
+
+async function createNeedRevisitListWithQuestion(questionSlug) {
+  const json = await leetcodeGraphql({
+    operationName: "AddQuestionToNewFavoriteV2",
+    query: ADD_QUESTION_TO_NEW_FAVORITE_V2_MUTATION,
+    variables: {
+      name: "need revisit",
+      isPublicFavorite: true,
+      questionSlug
+    }
+  });
+  const block = json?.data?.addQuestionToNewFavoriteV2;
+  if (json?.errors?.length) {
+    throw new Error(json.errors[0]?.message || "Failed to create need revisit list");
+  }
+  if (!block?.ok) {
+    throw new Error(block?.error || "Could not create need revisit list");
+  }
+  return block?.slug || "";
+}
+
+async function addQuestionToExistingFavoriteList(favoriteSlug, questionSlug) {
+  const json = await leetcodeGraphql({
+    operationName: "addQuestionToFavorite",
+    query: ADD_QUESTION_TO_FAVORITE_MUTATION,
+    variables: {
+      favoriteSlug,
+      questionSlug
+    }
+  });
+  const block = json?.data?.addQuestionToFavorite;
+  if (json?.errors?.length) {
+    throw new Error(json.errors[0]?.message || "Failed to add question to favorite list");
+  }
+  if (!block?.ok) {
+    throw new Error(block?.error || "Could not add question to favorite list");
+  }
+}
+
+async function ensureQuestionInNeedRevisitList(questionSlug) {
+  const slug = String(questionSlug || "");
+  if (!slug) return { ok: false, reason: "missing-question-slug" };
+  if (revisitSyncInFlightBySlug.has(slug)) return { ok: false, reason: "already-running" };
+
+  revisitSyncInFlightBySlug.add(slug);
+  try {
+    const lists = await fetchMyCreatedFavoriteLists(slug);
+    const target = lists.find(
+      f =>
+        normalizeFavoriteListName(f?.name) === "need revisit" &&
+        String(f?.favoriteType || "NORMAL").toUpperCase() === "NORMAL"
+    );
+
+    if (!target) {
+      const createdSlug = await createNeedRevisitListWithQuestion(slug);
+      return { ok: true, action: "created-and-added", favoriteSlug: createdSlug };
+    }
+
+    if (target.hasCurrentQuestion) {
+      return { ok: true, action: "already-present", favoriteSlug: target.slug };
+    }
+
+    await addQuestionToExistingFavoriteList(target.slug, slug);
+    return { ok: true, action: "added-existing-list", favoriteSlug: target.slug };
+  } finally {
+    revisitSyncInFlightBySlug.delete(slug);
+  }
+}
+
 async function loadProgressTopicInsights() {
   try {
     const { questions } = await fetchUserProgressQuestions({
@@ -1012,6 +1138,20 @@ async function loadDashboard() {
       error: String(err?.message || err || "Failed to load submission stats"),
       needsRevisit: null
     };
+  }
+
+  if (submissionHealth?.needsRevisit === true) {
+    try {
+      const syncResult = await ensureQuestionInNeedRevisitList(getTitleSlug());
+      if (syncResult?.ok && syncResult?.action !== "already-present") {
+        appendChatMessage("System", "Added this question to your 'need revisit' list.");
+      }
+    } catch (err) {
+      appendChatMessage(
+        "System",
+        `Needs-revisit bookmark sync failed: ${String(err?.message || err || "Unknown error")}`
+      );
+    }
   }
 
   const progressTopicInsights = await loadProgressTopicInsights();
